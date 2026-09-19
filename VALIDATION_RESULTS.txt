@@ -1,0 +1,10 @@
+AI Acceleration Studio v5.0.0
+CPU/package validation
+- pytest: 30 passed, 1 skipped (CUDA required)
+- compileall: PASS
+- editable install --no-build-isolation --no-deps: PASS
+- imported version: 5.0.0
+- GUI create_app(): Blocks
+- CLI --help: PASS
+- Dependency Doctor: PASS
+GPU-specific performance: NOT measured in the packaging CPU environment; run selftest on target NVIDIA GPU.

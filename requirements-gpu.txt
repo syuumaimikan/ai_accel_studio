@@ -1,5 +1,4 @@
-# Install a CUDA-enabled PyTorch wheel matching your CUDA driver first.
-# Linux/WSL2 is recommended for Triton.
-triton>=3.4
+# Install a CUDA build of PyTorch appropriate for your driver separately.
+triton>=3.3
 ninja>=1.11
-pynvml>=11.5
+nvidia-ml-py>=13.610.43

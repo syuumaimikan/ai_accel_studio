@@ -7,6 +7,8 @@ import pandas as pd
 from .metrics import output_metrics
 from .power import NvmlPowerSampler
 from .kernels.groupwise_int2 import pack_groupwise_int2,triton_groupwise_int2_linear
+from .kernels.decode_int2 import decode_int2_linear
+from .kernels.groupwise_int4 import pack_groupwise_int4,decode_int4_linear
 from .kernels.persistent_int2 import persistent_groupwise_int2_linear
 from .kernels.tma_tensorcore import tma_matmul
 from .kernels.sparse24_native import make_sparse_weight,linear as sparse_linear
@@ -33,7 +35,7 @@ def _bench(fn,repeats=100,warmup=10,power=False):
 def run_kernel_suite(m=32,n=4096,k=4096,group_size=128,repeats=100,power=True,methods=None):
     if not torch.cuda.is_available():
         raise RuntimeError('Kernel Lab requires NVIDIA CUDA GPU')
-    methods=methods or ['torch-fp16','groupwise-int2','persistent-int2','native-2to4','tma','hb-gluon','blackwell-warp-specialized']
+    methods=methods or ['torch-fp16','decode-int2-v4','decode-int4-v5','groupwise-int2','persistent-int2','native-2to4','tma','hb-gluon','blackwell-warp-specialized']
     dev='cuda'; torch.manual_seed(3)
     x=torch.randn(m,k,device=dev,dtype=torch.float16)
     w=torch.randn(n,k,device=dev,dtype=torch.float16)/(k**.5)
@@ -58,6 +60,11 @@ def run_kernel_suite(m=32,n=4096,k=4096,group_size=128,repeats=100,power=True,me
 
     pw=pack_groupwise_int2(w,group_size)
     packed_bytes=pw.packed.numel()+pw.scales.numel()*2
+    if 'decode-int2-v4' in methods and m <= 4:
+        add('decode-int2-v4',lambda:decode_int2_linear(x,pw,b),packed_bytes,'M<=4 specialized packed INT2 decode GEMV')
+    if 'decode-int4-v5' in methods and m <= 4:
+        p4=pack_groupwise_int4(w,group_size); p4bytes=p4.packed.numel()+p4.scales.numel()*2
+        add('decode-int4-v5',lambda:decode_int4_linear(x,p4,b),p4bytes,'M<=4 packed INT4 fallback for accuracy-sensitive layers')
     if 'groupwise-int2' in methods:
         add('groupwise-int2',lambda:triton_groupwise_int2_linear(x,pw,b),packed_bytes,'packed INT2 + per-group FP16 scale')
     if 'persistent-int2' in methods:

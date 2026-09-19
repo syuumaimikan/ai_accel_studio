@@ -1,28 +1,24 @@
 # Changelog
 
-## 3.0.0 — AI Acceleration Studio
+## 5.0.0
 
-- Added full Gradio GUI for hardware inspection, kernel microbenchmarks, multi-model comparison, giant-fusion experiments, Accuracy Guard and saved runs.
-- Added hardware-aware dispatch for Ampere/Ada, Hopper and Blackwell.
-- Added packed groupwise INT2 with per-group FP16 scales and activation-aware scale refinement.
-- Added persistent INT2 Triton kernel and multi-stage pipeline.
-- Added TMA tensor-descriptor path for SM90+.
-- Added optional Hopper WGMMA and Blackwell tcgen05/Tensor Memory Gluon paths with correctness self-tests.
-- Added optional Blackwell warp-specialized load/MMA/store partitioning.
-- Added single-token QKV + RoPE + KV-cache append + causal attention giant-fusion Triton experiment.
-- Added reusable Accuracy Guard for per-layer INT2/residual/FP16 decisions.
-- Added optimized model bundle save/load.
-- Added Hugging Face model matrix with TTFT, decode tok/s, total tok/s, NVML W, J/token, peak VRAM and perplexity.
-- Added measured per-model auto-selection under a perplexity quality guard, including baseline-relative speed/energy/quality columns.
-- Added existing-framework baselines: Transformers Hub kernels, SDPA, FlashAttention-2/3, paged FlashAttention-3, torch.compile and TorchAO.
-- Added advanced GPU self-test command and PTX/SASS code-generation scanner for WGMMA, MMA.SP, TMA and TCGEN05 signatures.
-- Retained v2 packed INT2, ternary, custom INT2+2:4, raw CUDA, native semi-structured sparse, Transformer, delta, memory and speculative benchmarks.
+- Added packed groupwise INT4 format and M<=4 decode-specialized Triton kernel.
+- Added mixed-bit planner that searches INT2 first, promotes sensitive layers to INT4, and keeps FP16 only when required.
+- Added held-out robust model-level guard using mean, P95, and worst relative NLL degradation.
+- Split calibration text into planning and validation subsets when possible to reduce calibration overfit.
+- Added diverse built-in calibration/evaluation suite for the GUI.
+- Added `baseline-static-compile` and `custom-mixedbit-v5-graph`.
+- Added Static KV Cache + `torch.compile(mode="reduce-overhead")` generation benchmark path.
+- Added graph-safe custom INT2/INT4 module dispatch mode to reduce graph breaks/exception-driven runtime dispatch.
+- Added exact baseline reload when the robust guard leaves zero quantized layers.
+- Added multi-text token-weighted perplexity evaluation.
+- Added Dependency Doctor that reads installed package metadata for Transformers/Kernels and TorchAO/MSLK requirements.
+- Added INT4 and CUDA Graph probes to GPU self-test.
+- Added v5 mixed-bit bundle format/load support.
+- Kept persistent INT2 out of automatic dispatch; it remains an explicit benchmark only.
 
-## 2.0.0
+## 4.0.0
 
-- Added real packed INT2/ternary Triton kernels and fused INT2 + 2:4 path.
-- Added raw CUDA/NVCC kernels and native 2:4 Sparse Tensor Core comparison.
-
-## 1.0.0
-
-- Initial research benchmark suite.
+- Added M<=4 decode-specialized packed groupwise INT2 kernel.
+- Added activation-aware exact FP16 outlier correction and model-level calibration guard.
+- Switched to fixed-token CUDA-event benchmarking and removed persistent INT2 from auto dispatch.

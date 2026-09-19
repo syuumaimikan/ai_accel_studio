@@ -96,6 +96,38 @@ def run_selftest(run_microbench: bool = False) -> dict[str, Any]:
         return {"ok": max_err < 0.5 and cos > 0.999, "max_abs_error": max_err, "cosine": cos}
     report["probes"].append(_probe("groupwise-int2-triton", int2_probe))
 
+    def decode_int2_probe():
+        from .kernels.groupwise_int2 import pack_groupwise_int2, unpack_groupwise_int2
+        from .kernels.decode_int2 import decode_int2_linear
+        x=torch.randn(1,256,device='cuda',dtype=torch.float16)
+        w=torch.randn(128,256,device='cuda',dtype=torch.float16)/16
+        pw=pack_groupwise_int2(w,group_size=64)
+        y=decode_int2_linear(x,pw)
+        ref=x @ unpack_groupwise_int2(pw,dtype=torch.float16).t()
+        torch.cuda.synchronize()
+        max_err=float((y.float()-ref.float()).abs().max().item())
+        cos=float(torch.nn.functional.cosine_similarity(y.float(),ref.float(),dim=-1).mean().item())
+        return {'ok':max_err<0.5 and cos>0.999,'max_abs_error':max_err,'cosine':cos}
+    report["probes"].append(_probe("decode-int2-v4",decode_int2_probe))
+
+    def decode_int4_probe():
+        from .kernels.groupwise_int4 import pack_groupwise_int4,unpack_groupwise_int4,decode_int4_linear
+        x=torch.randn(1,256,device='cuda',dtype=torch.float16);w=torch.randn(128,256,device='cuda',dtype=torch.float16)/16
+        pw=pack_groupwise_int4(w,group_size=64);y=decode_int4_linear(x,pw);ref=x @ unpack_groupwise_int4(pw,dtype=torch.float16).t();torch.cuda.synchronize()
+        max_err=float((y.float()-ref.float()).abs().max().item());cos=float(torch.nn.functional.cosine_similarity(y.float(),ref.float(),dim=-1).mean().item())
+        return {'ok':max_err<0.35 and cos>0.999,'max_abs_error':max_err,'cosine':cos}
+    report["probes"].append(_probe("decode-int4-v5",decode_int4_probe))
+
+    def cudagraph_probe():
+        x=torch.randn(128,128,device='cuda',dtype=torch.float16);w=torch.randn(128,128,device='cuda',dtype=torch.float16)
+        s=torch.cuda.Stream();s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3): y=x@w
+        torch.cuda.current_stream().wait_stream(s);g=torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g): y=x@w
+        g.replay();torch.cuda.synchronize();return bool(torch.isfinite(y).all().item())
+    report["probes"].append(_probe("cuda-graph-replay",cudagraph_probe))
+
     def fusion_probe():
         from .kernels.fused_decode_attention import giant_fusion_self_test
         return giant_fusion_self_test()

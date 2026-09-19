@@ -1,280 +1,264 @@
-# AI Acceleration Studio v3.0.0
+# AI Acceleration Studio v5.0.0
 
-既存の Hugging Face / PyTorch モデルへ高速化を適用し、**速度・消費電力・VRAM・出力品質を同じGUIで比較**するための研究/実装プロジェクトです。
+既存の Hugging Face decoder-only LLM を、**速度 / J-token / VRAM / 品質を同じ条件で測定しながら最適化する研究・実装用Studio**です。
 
-v3 は単なる fake quant benchmark ではなく、packed INT2、2:4 semi-structured sparsity、Hopper/Blackwell専用経路、Accuracy Guard、モデルbundle保存まで含みます。
+v5は、v4実測で分かった次の問題を直接狙っています。
 
-## 重要な前提
+- packed INT2 GEMV自体は改善したがFP16よりまだ遅い
+- custom runtime全体ではkernel launch / Python dispatchがさらに効いていた
+- 1つのcalibration集合ではAccuracy Guardが過学習することがあった
+- INT2が厳しい層を全てFP16へ戻すと圧縮率を失う
+- SmolLMのように全層rollbackした場合でも、custom経路の測定がbaselineより遅く見えることがあった
+- `hf-kernels-auto` / TorchAOのoptional dependency差で比較行が失敗することがあった
 
-高速化・省電力化・精度維持はGPU、shape、モデル、context lengthで結果が変わります。**全モデルで必ず元モデルより高速・省電力・高精度になることは保証できません。**
+## v5の主要変更
 
-このStudioは、候補手法を実測し、Accuracy Guardで精度劣化が大きい層をFP16へ戻すことで、性能と品質のPareto点を探す設計です。
+### 1. INT2 -> INT4 -> FP16 mixed-bit planner
 
-## 主な高速化経路
-
-### 1. Groupwise INT2
-
-- 4 weights / byte の実packed storage
-- group size: 32 / 64 / 128 / 256
-- kernel内 unpack + dequant + matmul
-- activation-aware scale refinement
-- low-rank residual correction
-- decode向け persistent INT2 kernel
-
-### 2. 2:4 Semi-Structured Sparsity
-
-`torch.sparse.to_sparse_semi_structured` / vendor sparse GEMM経路を使います。対応GPUではSparse Tensor Coreの実装へdispatchされます。
-
-### 3. Hopper / Blackwell
-
-`ai_accel_lab/kernels/gluon_hopper_blackwell.py` は起動時self-testに成功した環境でのみ有効になります。
-
-- Hopper SM90: TMA + asynchronous WGMMA
-- Blackwell SM100+: TMA + tcgen05 + Tensor Memory
-- persistent tile scheduling
-- 3〜4段operand buffering
-- async load / MMA overlap
-
-`gluon_warp_specialized.py` にはBlackwell向けのload / MMA / store warp partition版もあります。
-
-### 4. TMA
-
-`tma_tensorcore.py` は `tl.make_tensor_descriptor` を使います。Hopper以降ではTritonがTMA-backed descriptor load/storeへlowerできる経路です。
-
-### 5. Giant Decode Fusion
-
-`fused_decode_attention.py` の実験kernelはsingle-token decodeで以下を1 Triton kernel内にまとめます。
+各Linearを最初から同じbit数に固定しません。
 
 ```text
-packed groupwise INT2 Q/K/V projection
-                ↓
-               RoPE
-                ↓
-          KV cache append
-                ↓
-       causal online-softmax
-                ↓
-          attention output
+INT2 + activation-aware group scale
+  -> exact FP16 outlier columns
+  -> optional low-rank residual
+      | pass
+      v
+     INT2
+      |
+      | fail
+      v
+packed INT4 + exact outlier columns
+      | pass
+      v
+     INT4
+      |
+      | fail
+      v
+     FP16
 ```
 
-現時点のgiant fusionは安全のため **MHA + head_dim 64/128** に限定しています。GQA/MQAや未対応shapeは通常経路へfallbackします。
+精度の高い層だけ4/16bitへ昇格させ、帯域削減が効く層は2bitのまま残します。
 
-## Accuracy Guard
+### 2. held-out Robust Accuracy Guard
 
-量子化を全層へ強制すると品質が落ちるモデルがあります。そのためStudioは代表inputを記録し、各Linearについて次を試します。
+v4は同じcalibration集合で計画と最終判定を行うため、局所的に良くても別テキストでPPLが悪化する場合がありました。
+
+v5は入力集合を交互に分け、
+
+- plan/calibration prompts
+- held-out validation prompts
+
+として使用します。最終rollback条件は平均だけでなく:
+
+- mean relative NLL increase
+- P95 relative NLL increase
+- worst relative NLL increase
+
+を見ます。
+
+### 3. Static KV Cache + torch.compile / CUDA-Graph-friendly runtime
+
+`baseline-static-compile` と `custom-mixedbit-v5-graph` を追加しました。
 
 ```text
-INT2
-INT2 + rank 4 residual
-INT2 + rank 8 residual
-INT2 + rank 16 residual
-...
-FP16 fallback
+Static KV Cache
+    +
+torch.compile(mode="reduce-overhead")
+    +
+graph-safe custom INT2/INT4 decode modules
 ```
 
-判定にはoutput NMSEとcosine similarityを使います。基準を満たせない敏感層はFP16のまま残します。
+固定shapeのdecodeでPython/C++/CUDA-driver launch setupを減らすための経路です。
 
-つまり「INT2だから速い」を優先するのではなく、**品質制約の中で最も軽い構成**を狙います。
+### 4. M<=4 decode専用 packed INT2 / INT4
 
-## GUI
+- `decode-int2-v4`: 4 weights / byte
+- `decode-int4-v5`: 2 weights / byte
 
-### インストール
+どちらも小M autoregressive decode向けです。packed weightをHBMから読み、kernel内でdecode + group scaleを行います。
 
-Linux / WSL2 + NVIDIA GPU 推奨です。
+INT2はnative INT2 Tensor Coreを名乗るものではなく、**2-bit storage + fused dequant/GEMV**です。
+
+### 5. zero-optimized-layer exact baseline reload
+
+Robust Guardが全層をFP16へ戻した場合、custom wrapperやallocatorの残留状態でbaseline-equivalent measurementが遅く見えないよう、**モデルをbaselineとして再ロードしてから測定**します。
+
+### 6. multi-text perplexity
+
+GUIのPPL評価も1文章だけではなく `---` 区切りの複数held-out文章をtoken-weighted NLLで集約します。
+
+### 7. Dependency Doctor
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
+python -m ai_accel_lab doctor
+```
+
+インストール済みpackage metadataを読み、特に:
+
+- `transformers -> kernels`
+- `torchao -> mslk`
+
+の要求範囲を表示します。固定versionを憶測で案内しません。
+
+## 比較方式
+
+- `baseline-fp16`
+- `baseline-static-compile`
+- `hf-kernels-auto`
+- `sdpa`
+- FlashAttention 2 / 3 / paged FA3
+- `torch-compile`
+- TorchAO INT4 / INT8 / INT2
+- native 2:4 sparse
+- custom INT2 v4系
+- `custom-mixedbit-v5`
+- `custom-mixedbit-v5-graph`
+- Hopper WGMMA/TMA experiments
+- Blackwell tcgen05/TMEM / warp-specialization experiments
+- QKV+RoPE+KV-cache+attention fusion microbenchmark
+
+## セットアップ
+
+Python 3.10+。まずGPU/driverに合ったCUDA版PyTorchを導入してください。
+
+```bash
 pip install -r requirements-full.txt
 ```
 
-CUDA対応PyTorchは使用するCUDA環境に合わせて先にインストールしてください。
-
-### 起動
+依存関係を確認:
 
 ```bash
-python studio.py
+python -m ai_accel_lab doctor
 ```
 
-または
-
-```bash
-python -m ai_accel_lab studio
-```
-
-ブラウザで `http://127.0.0.1:7860` を開きます。
-
-### GUIタブ
-
-- **Hardware** — GPU世代、SM、TMA/WGMMA/tcgen05対応を表示
-- **Kernel Lab** — FP16 / INT2 / persistent / 2:4 / TMA / Hopper-Blackwell backend比較
-- **Model Matrix** — 複数モデル × 複数手法を順番に比較
-- **Giant Fusion** — QKV+RoPE+Attention融合kernel比較
-- **Accuracy Guard** — 既存モデルをキャリブレーションし再利用可能bundleへ変換
-- **Architecture paths** — 現在有効なbackendの説明
-- **Runs** — CSV/JSONで保存された過去結果
-
-## Model Matrix の比較項目
-
-- TTFT (ms)
-- decode tokens/s
-- total tokens/s
-- average GPU power (W)
-- Joules / generated token
-- peak VRAM
-- perplexity
-- Accuracy Guardで最適化できた層数
-- generated text
-- baseline比 speedup / J-token削減率 / perplexity差
-- 品質許容内で最速だった実測方式の `recommended_measured` マーク
-
-モデルは同時にVRAMへ載せず、**1モデル・1手法ずつロード→測定→解放**します。
-
-## 対応モデル
-
-Linear replacementはモデル固有コードに依存しないため、`q_proj/k_proj/v_proj/o_proj` や `gate_proj/up_proj/down_proj` を持つ多くのdecoder-only Transformerで利用できます。
-
-GUIの初期例:
-
-- `Qwen/Qwen2.5-0.5B-Instruct`
-- `HuggingFaceTB/SmolLM2-360M-Instruct`
-
-Transformers側の標準/既存高速化（Hub kernels、SDPA、FlashAttention系）も比較対象に含めています。
-
-任意のHugging Face IDまたはローカルpathを入力できます。モデル固有のcustom opが強い場合は、baseline/torchao側がcustom INT2より速いこともあります。
-
-## 比較手法
-
-Model Matrixには次があります。
-
-```text
-baseline-fp16
-hf-kernels-auto
-sdpa
-hf-flash-attn2-kernel
-hf-flash-attn3-kernel
-flash-attention-2
-flash-attention-3
-paged-flash-attention-3
-torch-compile
-torchao-int4
-torchao-int8
-torchao-int2
-native-2to4
-custom-int2-fast
-custom-int2-residual
-custom-int2-accuracy-guard
-```
-
-## 最適化bundle
-
-Accuracy Guardタブでbundleを作ると以下が保存されます。
-
-```text
-optimized_bundles/...
-├─ accel_manifest.json
-├─ optimized_state.pt
-└─ tokenizer/
-```
-
-ロードAPI:
-
-```python
-from ai_accel_lab.optimize.bundle import load_bundle
-model, tokenizer, manifest, missing, unexpected = load_bundle(
-    "optimized_bundles/model-int2"
-)
-```
-
-## CLI
-
-ハードウェア確認:
-
-```bash
-python -m ai_accel_lab hardware
-```
-
-高度backendのcorrectness self-test（H100/B100/B200上で推奨）:
+GPU経路を検証:
 
 ```bash
 python -m ai_accel_lab selftest --microbench --json results/selftest.json
 ```
 
-kernel比較:
+## GUI
 
 ```bash
-python -m ai_accel_lab kernel-suite \
-  --m 32 --n 4096 --k 4096 \
-  --group-size 128 --repeats 200 --power
+python studio.py
 ```
 
-モデル比較:
+または:
+
+```bash
+python -m ai_accel_lab studio
+```
+
+## Qwen2.5-0.5B 推奨比較
 
 ```bash
 python -m ai_accel_lab model-bench \
-  --models Qwen/Qwen2.5-0.5B-Instruct,HuggingFaceTB/SmolLM2-360M-Instruct \
-  --methods baseline-fp16,torchao-int4,custom-int2-accuracy-guard
+  --models Qwen/Qwen2.5-0.5B-Instruct \
+  --methods baseline-fp16,baseline-static-compile,hf-kernels-auto,torchao-int4,custom-mixedbit-v5,custom-mixedbit-v5-graph \
+  --new-tokens 64 \
+  --group-size 128 \
+  --nmse-limit 0.06 \
+  --cosine-limit 0.96 \
+  --global-loss-budget 0.02 \
+  --residual-rank 8
 ```
 
-## 実際にWGMMA / MMA.SP / TMAが出たか確認
+GUIではより多様な16 calibration promptsと4 held-out perplexity textsを標準で入れています。
 
-高水準API名だけで判断せず、生成codeを確認するためのscannerを入れています。
+## Decode kernel単体比較
 
 ```bash
-python tools/verify_codegen.py path/to/kernel.cubin
+python -m ai_accel_lab kernel-suite \
+  --m 1 \
+  --n 4096 \
+  --k 4096 \
+  --group-size 64 \
+  --repeats 500 \
+  --power
 ```
 
-検出対象:
+GUIでは以下を同時比較できます。
 
 ```text
-WGMMA / wgmma.mma_async
-MMA.SP / mma.sp
-CPASYNC.BULK.TENSOR / TMA
-TCGEN05 / tcgen05.mma
+torch-fp16
+decode-int2-v4
+decode-int4-v5
+groupwise-int2
+native-2to4
+...
 ```
 
-実プロファイルには Nsight Compute も推奨です。
+## 判断ルール
 
-## Self-test と fallback
+Studioは低bit/sparse/persistentという名前だけで高速と判定しません。
 
-高度backendは次の順で扱います。
+モデルごとにbaselineと比較して:
 
-```text
-architecture check
-      ↓
-small correctness self-test
-      ↓ pass
-backend enabled
-      ↓ fail
-TMA / Triton / PyTorch fallback
-```
+- decode tokens/s
+- TTFT
+- total tokens/s
+- W
+- J/generated-token
+- model storage
+- current/reserved/peak VRAM
+- perplexity
+- quality pass
 
-高速なkernelでも誤差が許容範囲を超えれば有効化しない設計です。
+を測り、品質条件を通った実測候補の中から最速をマークします。
 
-## Tests
+小型モデルではFP16 + static cache + compileが勝つことがあります。それも正常な結果です。大型モデルではweight-bandwidth比率が上がるためmixed-bitの価値が増える可能性があります。
+
+## Hopper / Blackwell
+
+実験経路を維持しています。
+
+- Hopper WGMMA
+- TMA
+- persistent scheduling
+- Blackwell tcgen05 / Tensor Memory
+- warp specialization
+- PTX/SASS marker verification
+
+ただしTriton公式の例でもshapeによりcuBLASがpersistent kernelを上回るため、自動的に高度kernelを勝者扱いしません。
+
+## Bundle
+
+GUIの **Robust Mixed-Bit Guard v5** からv5 bundleを保存できます。
+
+v5 bundleは置換済み層についてdense source weightをstate_dictに保持せず、packed INT2/INT4、scale、outlier、必要なresidualだけを保存します。
+
+## テスト
 
 ```bash
-pytest -q
+pytest
 ```
 
-CUDA環境でのみ動くテストはCUDAなし環境ではskipされます。
+CPU-only環境ではCUDA専用testはskipされます。
 
-## 現在の制約
+## 主な構成
 
-- 手元の生成環境にはNVIDIA GPU/NVCC/Triton GPU runtimeがないため、Hopper/Blackwell専用kernelをこのZIP作成時に実機benchmarkできていません。
-- CPUで実行できるpacking、Accuracy Guard、GUI import、既存benchmarkのテストは実行しています。
-- Gluonはexperimental APIなのでTritonの将来版でAPI変更が起きる可能性があります。そのためself-test/fallbackを必須にしています。
-- giant fusionはまずsingle-token MHA decodeへ対象を絞っています。モデル統合では未対応attention shapeを自動fallbackさせるのが安全です。
+```text
+ai_accel_lab/
+  kernels/
+    decode_int2.py
+    groupwise_int2.py
+    groupwise_int4.py       # v5
+    tma_tensorcore.py
+    gluon_hopper_blackwell.py
+    gluon_warp_specialized.py
+  optimize/
+    hybrid_int2.py
+    hybrid_int4.py          # v5
+    planner_v5.py           # 2 -> 4 -> 16 bit planner
+    robust_guard.py         # held-out mean/P95/worst NLL guard
+    bundle.py
+  runtime_v5.py             # StaticCache + compile benchmark path
+  calibration_suite.py
+  doctor.py
+  model_benchmark.py
+  studio/app.py
+```
 
-## 参考にした公式仕様
+## 注意
 
-- NVIDIA PTX ISA: https://docs.nvidia.com/cuda/parallel-thread-execution/
-- CUDA Programming Guide: https://docs.nvidia.com/cuda/cuda-programming-guide/
-- Triton TMA tensor descriptors: https://triton-lang.org/main/python-api/generated/triton.language.make_tensor_descriptor.html
-- Triton Persistent Kernels: https://triton-lang.org/main/getting-started/tutorials/gluon/persistence.html
-- Triton Warp Specialization: https://triton-lang.org/main/getting-started/tutorials/gluon/warp-specialization.html
-- Triton WGMMA: https://triton-lang.org/main/getting-started/tutorials/gluon/wgmma.html
-- Triton Blackwell tcgen05: https://triton-lang.org/main/getting-started/tutorials/gluon/tcgen05.html
-- PyTorch 2:4 semi-structured sparsity: https://docs.pytorch.org/tutorials/advanced/semi_structured_sparse.html
-- torchao quantization: https://docs.pytorch.org/ao/stable/
+このリポジトリは研究・検証用です。特定GPU/shapeでの速度倍率は実機測定なしには保証しません。custom Hopper/Blackwell kernelはself-testに通った経路のみ使用してください。

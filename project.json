@@ -1,37 +1,19 @@
 {
   "name": "AI Acceleration Studio",
-  "version": "3.0.0",
-  "purpose": "hardware-aware inference acceleration and multi-model quality/energy comparison",
-  "architectures": [
-    "Ampere/Ada",
-    "Hopper SM90",
-    "Blackwell SM100+"
+  "version": "5.0.0",
+  "focus": "measured end-to-end LLM acceleration with mixed-bit quality control and graph-friendly decode",
+  "key_changes": [
+    "INT2 -> INT4 -> FP16 mixed-bit planner",
+    "held-out mean/P95/worst NLL guard",
+    "packed INT4 M<=4 decode kernel",
+    "Static KV Cache + torch.compile graph path",
+    "graph-safe custom quantized module dispatch",
+    "zero-optimized-layer exact baseline reload",
+    "multi-text perplexity",
+    "dependency doctor",
+    "v5 bundle format"
   ],
-  "methods": [
-    "FP16/BF16 baseline",
-    "Transformers Hub kernels",
-    "SDPA",
-    "FlashAttention-2/3",
-    "TorchAO INT4/INT8/INT2",
-    "packed groupwise INT2",
-    "activation-aware INT2",
-    "INT2 + low-rank residual",
-    "native 2:4 sparse",
-    "persistent kernels",
-    "TMA",
-    "WGMMA experimental",
-    "tcgen05 experimental",
-    "warp specialization experimental",
-    "QKV+RoPE+attention giant fusion experimental"
-  ],
-  "gui": [
-    "Hardware",
-    "Kernel Lab",
-    "Model Matrix",
-    "Giant Fusion",
-    "Accuracy Guard",
-    "Architecture paths",
-    "Runs"
-  ],
-  "validation_environment": "CPU-only packaging environment; GPU paths are self-tested at runtime on target hardware"
+  "architectures": ["Ampere/Ada", "Hopper SM90", "Blackwell SM100+"],
+  "model_families": ["Qwen2/Qwen2.5", "Llama", "Mistral", "Gemma", "SmolLM and compatible decoder-only HF models"],
+  "experimental": ["WGMMA/TMA", "tcgen05/TMEM", "warp specialization", "QKV+RoPE+attention giant fusion"]
 }
