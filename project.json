@@ -1,0 +1,37 @@
+{
+  "name": "AI Acceleration Studio",
+  "version": "3.0.0",
+  "purpose": "hardware-aware inference acceleration and multi-model quality/energy comparison",
+  "architectures": [
+    "Ampere/Ada",
+    "Hopper SM90",
+    "Blackwell SM100+"
+  ],
+  "methods": [
+    "FP16/BF16 baseline",
+    "Transformers Hub kernels",
+    "SDPA",
+    "FlashAttention-2/3",
+    "TorchAO INT4/INT8/INT2",
+    "packed groupwise INT2",
+    "activation-aware INT2",
+    "INT2 + low-rank residual",
+    "native 2:4 sparse",
+    "persistent kernels",
+    "TMA",
+    "WGMMA experimental",
+    "tcgen05 experimental",
+    "warp specialization experimental",
+    "QKV+RoPE+attention giant fusion experimental"
+  ],
+  "gui": [
+    "Hardware",
+    "Kernel Lab",
+    "Model Matrix",
+    "Giant Fusion",
+    "Accuracy Guard",
+    "Architecture paths",
+    "Runs"
+  ],
+  "validation_environment": "CPU-only packaging environment; GPU paths are self-tested at runtime on target hardware"
+}

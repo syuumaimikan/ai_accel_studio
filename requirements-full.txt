@@ -1,0 +1,4 @@
+-r requirements.txt
+-r requirements-gpu.txt
+-r requirements-models.txt
+-r requirements-gui.txt

@@ -1,0 +1,7 @@
+torch>=2.8
+numpy>=1.26
+pandas>=2.2
+psutil>=5.9
+pynvml>=11.5
+matplotlib>=3.8
+pytest>=8.0

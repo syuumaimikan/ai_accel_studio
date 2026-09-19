@@ -1,0 +1,7 @@
+transformers>=5.0
+accelerate>=1.0
+safetensors>=0.5
+sentencepiece>=0.2
+torchao>=0.15
+
+kernels>=0.11

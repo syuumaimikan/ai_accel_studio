@@ -1,0 +1,4 @@
+transformers>=4.45
+accelerate>=0.34
+sentencepiece>=0.2
+triton>=3.0; platform_system == "Linux"
